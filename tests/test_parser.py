@@ -124,6 +124,36 @@ BUTTON_PROGRAMMING_XML = """
                                         <Component ComponentNumber="3" ComponentType="BUTTON">
                                             <Button Engraving="Unprogrammed" ButtonType="SingleAction" UUID="705" />
                                         </Component>
+                                        <Component ComponentNumber="4" ComponentType="BUTTON">
+                                            <Button Engraving="Multi" ButtonType="SingleAction" UUID="706">
+                                                <Actions>
+                                                    <Action Name="Press" ActionType="3"><Presets>
+                                                        <Preset Name="On" UUID="707"><PresetAssignments>
+                                                            <PresetAssignment AssignmentName="GOTO_LEVEL" AssignmentType="2">
+                                                                <Level>100.00</Level><IntegrationID>13</IntegrationID>
+                                                            </PresetAssignment>
+                                                        </PresetAssignments></Preset>
+                                                    </Presets></Action>
+                                                    <Action Name="Release" ActionType="4"><Presets>
+                                                        <Preset Name="Off" UUID="708"><PresetAssignments>
+                                                            <PresetAssignment AssignmentName="GOTO_LEVEL" AssignmentType="2">
+                                                                <Level>0.00</Level><IntegrationID>13</IntegrationID>
+                                                            </PresetAssignment>
+                                                            <PresetAssignment AssignmentName="GOTO_LEVEL" AssignmentType="2">
+                                                                <Level>50.00</Level><IntegrationID>14</IntegrationID>
+                                                            </PresetAssignment>
+                                                        </PresetAssignments></Preset>
+                                                    </Presets></Action>
+                                                    <Action Name="Hold" ActionType="5"><Presets>
+                                                        <Preset Name="Dim" UUID="709"><PresetAssignments>
+                                                            <PresetAssignment AssignmentName="GOTO_LEVEL" AssignmentType="2">
+                                                                <Level>25.00</Level><IntegrationID>15</IntegrationID>
+                                                            </PresetAssignment>
+                                                        </PresetAssignments></Preset>
+                                                    </Presets></Action>
+                                                </Actions>
+                                            </Button>
+                                        </Component>
                                     </Components>
                                 </Device>
                             </Devices>
@@ -252,16 +282,38 @@ class TestButtonAffectedOutputs(unittest.TestCase):
 
     def test_scene_reference_is_resolved_across_areas(self) -> None:
         # The scene belongs to "Living Room"; the keypad sits in "Hall".
-        self.assertEqual(self.buttons["Evening"].affected_outputs,
-                         {10: 40.0, 11: 0.0})
+        button = self.buttons["Evening"]
+        self.assertEqual(button.affected_outputs, {10, 11})
+        self.assertEqual(button.affected_outputs_by_action,
+                         {"Press": {10: 40.0, 11: 0.0}})
 
     def test_direct_level_assignment(self) -> None:
-        self.assertEqual(self.buttons["Lamp"].affected_outputs, {12: 75.0})
+        button = self.buttons["Lamp"]
+        self.assertEqual(button.affected_outputs, {12})
+        self.assertEqual(button.affected_outputs_by_action,
+                         {"Press": {12: 75.0}})
 
     def test_button_without_programming(self) -> None:
-        self.assertEqual(self.buttons["Unprogrammed"].affected_outputs, {})
+        button = self.buttons["Unprogrammed"]
+        self.assertEqual(button.affected_outputs, set())
+        self.assertEqual(button.affected_outputs_by_action, {})
+
+    def test_actions_are_not_merged(self) -> None:
+        # Press and Release drive output 13 to conflicting levels; keeping them
+        # apart is the only way either value means anything.
+        button = self.buttons["Multi"]
+        self.assertEqual(button.affected_outputs_by_action,
+                         {"Press": {13: 100.0},
+                          "Release": {13: 0.0, 14: 50.0},
+                          "Hold": {15: 25.0}})
+
+    def test_affected_outputs_is_the_union_across_actions(self) -> None:
+        self.assertEqual(self.buttons["Multi"].affected_outputs, {13, 14, 15})
 
     def test_returned_mapping_is_a_copy(self) -> None:
         button = self.buttons["Lamp"]
-        button.affected_outputs[12] = 0.0
-        self.assertEqual(button.affected_outputs, {12: 75.0})
+        button.affected_outputs.add(99)
+        button.affected_outputs_by_action["Press"][12] = 0.0
+        self.assertEqual(button.affected_outputs, {12})
+        self.assertEqual(button.affected_outputs_by_action,
+                         {"Press": {12: 75.0}})

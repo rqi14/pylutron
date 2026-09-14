@@ -20,7 +20,7 @@ from xml.etree import ElementTree as ET
 
 import asyncio
 import telnetlib3
-from typing import Any, Callable, Dict, Type, List, Optional, Tuple, Union, TYPE_CHECKING, cast
+from typing import Any, Callable, Dict, Set, Type, List, Optional, Tuple, Union, TYPE_CHECKING, cast
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -315,16 +315,25 @@ class LutronXmlDbParser(object):
           scene_refs.append((integration_id, number))
     return levels, scene_refs
 
-  def _button_affected_outputs(self, button_xml: ET.Element) -> Dict[int, float]:
-    """Resolves what pressing this button assigns, scene refs included."""
-    affected: Dict[int, float] = {}
+  def _button_affected_outputs(
+      self, button_xml: ET.Element) -> Dict[str, Dict[int, float]]:
+    """Resolves what each of a button's actions assigns, scene refs included.
+
+    A button is programmed per action: Press, Release, Hold and MultiTap can
+    each drive a different set of outputs to different levels, so they are kept
+    apart rather than merged into one mapping.
+    """
+    by_action: Dict[str, Dict[int, float]] = {}
     for action_xml in button_xml.findall('./Actions/Action'):
+      action = action_xml.get('Name') or action_xml.get('ActionType') or ''
+      levels_for_action = by_action.setdefault(action, {})
       for preset_xml in action_xml.findall('./Presets/Preset'):
         levels, scene_refs = self._preset_assignments(preset_xml)
-        affected.update(levels)
+        levels_for_action.update(levels)
         for area_id, number in scene_refs:
-          affected.update(self._scene_levels.get(area_id, {}).get(number, {}))
-    return affected
+          levels_for_action.update(
+              self._scene_levels.get(area_id, {}).get(number, {}))
+    return {action: levels for action, levels in by_action.items() if levels}
 
   def parse(self) -> bool:
     """Main entrypoint into the parser. It interprets and creates all the
@@ -488,7 +497,7 @@ class LutronXmlDbParser(object):
                     button_type=button_type,
                     direction=direction,
                     uuid=button_xml.get('UUID') or "",
-                    affected_outputs=self._button_affected_outputs(button_xml))
+                    affected_outputs_by_action=self._button_affected_outputs(button_xml))
     return button
 
   def _parse_led(self, keypad: Keypad, component_xml: ET.Element) -> Led:
@@ -1052,12 +1061,14 @@ class Button(KeypadComponent):
     RELEASED = 2
     DOUBLE_CLICKED = 3
 
-  def __init__(self, lutron: Lutron, keypad: Keypad, name: str, num: int, button_type: str, direction: Optional[str], uuid: str, affected_outputs: Optional[Dict[int, float]] = None) -> None:
+  def __init__(self, lutron: Lutron, keypad: Keypad, name: str, num: int, button_type: str, direction: Optional[str], uuid: str, affected_outputs_by_action: Optional[Dict[str, Dict[int, float]]] = None) -> None:
     """Initializes the Button class."""
     super(Button, self).__init__(lutron, keypad, name, num, num, uuid)
     self._button_type = button_type
     self._direction = direction
-    self._affected_outputs = dict(affected_outputs or {})
+    self._affected_outputs_by_action = {
+        action: dict(levels)
+        for action, levels in (affected_outputs_by_action or {}).items()}
 
   def __str__(self) -> str:
     """Pretty printed string value of the Button object."""
@@ -1075,24 +1086,41 @@ class Button(KeypadComponent):
     return self._button_type
 
   @property
-  def affected_outputs(self) -> Dict[int, float]:
-    """Outputs this button can change, mapped to the level it assigns them.
+  def affected_outputs(self) -> Set[int]:
+    """Integration ids of the outputs this button's programming can change.
 
-    Read from the button's programming in the XML database: its Press action's
-    presets, with GOTO_SCENE assignments resolved through the target area's
-    scene table. Empty for buttons that drive nothing (or whose programming the
-    database does not describe).
+    Read from the button's programming in the XML database: the presets of
+    every action it defines (Press, Release, Hold, MultiTap), with GOTO_SCENE
+    assignments resolved through the target area's scene table. Empty for
+    buttons that drive nothing (or whose programming the database does not
+    describe).
 
-    The keys are dependable -- pressing this button can change exactly these
-    outputs and no others. That is enough to refresh the right subset after a
-    press instead of every output in the system.
+    This is the union across actions, which is what a consumer needs to refresh
+    the right subset of outputs after a button event instead of every output in
+    the system. Which of them actually moved depends on the action the button
+    reported; see `affected_outputs_by_action` for the per-action programming.
+    """
+    outputs: Set[int] = set()
+    for levels in self._affected_outputs_by_action.values():
+      outputs.update(levels)
+    return outputs
 
-    The values are what the programming assigns, which is not always what the
+  @property
+  def affected_outputs_by_action(self) -> Dict[str, Dict[int, float]]:
+    """Per-action programming, as {action name: {output id: level}}.
+
+    Keyed by the action name used in the XML database ('Press', 'Release',
+    'Hold', 'MultiTap'); actions with no assignments are omitted. A button can
+    program the same output to different levels on different actions, so these
+    are deliberately not merged.
+
+    The levels are what the programming assigns, which is not always what the
     outputs end up at: a toggle button's result depends on the current state,
     and a raise/lower button's depends on how long it is held. Treat them as a
     prediction to be confirmed, not as fact.
     """
-    return dict(self._affected_outputs)
+    return {action: dict(levels)
+            for action, levels in self._affected_outputs_by_action.items()}
 
   def press(self) -> None:
     """Triggers a simulated button press to the Keypad."""
